@@ -23,6 +23,34 @@ name: sim-verify
 # Everything else (simulator boot, app install, Maestro invocation, video +
 # screenshot capture, crash-report collection, artifact upload, job
 # summary) is identical to the private lane.
+#
+# Per-flow step timeouts (2026-07-10, replacing one monolithic Maestro
+# step): run 29046707377 (`flow=all` vs build #16) hit the 55-min JOB cap
+# while stuck inside the single "Run Maestro walkthrough" step at 53m26s --
+# the job-level cancellation ate the ~5-min upload grace period and
+# force-killed the runner BEFORE the `if: always()` artifact-upload steps
+# ran, so that run produced ZERO artifacts (no screenshots, no video, no
+# JUnit, no syslog -- an empty logs archive). Contrast with run 29037752215,
+# an earlier FAILING run (a real phone-field char-drop flake, see
+# maestro/flows/01-boot-login.yaml's header) that still uploaded full
+# diagnostics because it failed inside a step, not the job cap -- that
+# failure was diagnosable; 29046707377's was not. Splitting the walkthrough
+# into one step per flow, each with its OWN timeout-minutes, means a hang
+# now fails a single step (not the whole job), the if: always()-gated
+# finalize/upload steps always get to run, and the run gets per-flow timing
+# for free (see the final gate step's per-flow outcome table, sourced from
+# `steps.flow_0N.outcome`).
+#
+# Per-flow step budgets (flow=all runs login three times -- flows 01, 03,
+# 04, the latter two via `runFlow: 01-boot-login.yaml` -- flow 01 alone
+# took 9m48s while GREEN on run 29039997885):
+#   01-boot-login:    16 min
+#   02-map-and-tabs:   8 min
+#   03-click-audit:   20 min
+#   04-no-location:   16 min
+#   job (backstop):   80 min -- loose ceiling only (sum of the above plus
+#                     setup/finalize overhead); not meant to bind in normal
+#                     operation now that each flow is independently bounded.
 
 on:
   workflow_dispatch:
@@ -31,14 +59,14 @@ on:
         description: "EAS iOS simulator build .tar.gz URL (applicationArchiveUrl from `eas build:list --platform ios --json`)"
         required: true
       flow:
-        description: "Maestro flow to run: 'all' (01-03 seeded + 04-no-location cleared, two invocations) or a single filename e.g. 01-boot-login.yaml. 04-no-location.yaml always runs with the simulated location cleared, seeded or standalone."
+        description: "Maestro flow to run: 'all' (01-04, per-flow steps) or a single filename e.g. 01-boot-login.yaml. 04-no-location.yaml always runs with the simulated location cleared, seeded or standalone."
         required: false
         default: "all"
 
 jobs:
   sim-verify:
     runs-on: macos-15
-    timeout-minutes: 55
+    timeout-minutes: 80
     env:
       APP_ID: com.popupgram.ios
       FLOWS_DIR: maestro/flows
@@ -110,9 +138,9 @@ jobs:
           # location at all -- the exact PopUp15 blank-void scenario. When
           # that flow is requested standalone, skip the seed / explicitly
           # clear it instead of the usual Moscow default. `flow: all`'s
-          # location handling is more granular -- see the "Run Maestro
-          # walkthrough" step, which seeds here for 01-03 and clears before
-          # invoking 04.
+          # location handling is more granular -- see the "Clear simulated
+          # location" step below, which fires only on the seeded->no-location
+          # transition (i.e. only when flow=all).
           if [ "${{ github.event.inputs.flow }}" = "04-no-location.yaml" ]; then
             echo "flow=04-no-location.yaml -- clearing any simulated location instead of seeding Moscow."
             xcrun simctl location "$SIM_UDID" clear || true
@@ -140,7 +168,23 @@ jobs:
           xcrun simctl spawn "$SIM_UDID" log stream --predicate 'process == "PopUp"' --style compact > "$RUNNER_TEMP/popup-syslog.txt" 2>&1 &
           echo $! > "$RUNNER_TEMP/popup-syslog.pid"
 
-      - name: Run Maestro walkthrough (+ record video)
+      - name: Start screen recording (background)
+        # Job-scoped: recording spans every flow step below so a mid-flow
+        # step-timeout kill (or a crash) still yields a video up to that
+        # point. PID persisted to a file (same cross-step-background pattern
+        # as the syslog capture above); stopped + flushed in the
+        # if: always()-gated "Stop screen recording" step near the end.
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          xcrun simctl io "$SIM_UDID" recordVideo --codec h264 --force artifacts/run.mp4 &
+          echo $! > "$RUNNER_TEMP/popup-video.pid"
+          sleep 2
+
+      - name: "Run Maestro flow: 01-boot-login"
+        id: flow_01
+        if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '01-boot-login.yaml') }}
+        timeout-minutes: 16
         env:
           # Public repo — no plaintext credentials in the workflow. Set via:
           #   gh secret set DEMO_PHONE -R Beastgearr/popup-verify
@@ -150,83 +194,111 @@ jobs:
         run: |
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/01-boot-login
+          maestro test "$FLOWS_DIR/01-boot-login.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-01-boot-login.xml \
+            --debug-output artifacts/maestro-debug-01-boot-login
+          MAESTRO_EXIT=$?
+          mv ./*.png artifacts/seeded/01-boot-login/ 2>/dev/null || true
+          echo "01-boot-login exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
+      - name: "Run Maestro flow: 02-map-and-tabs"
+        id: flow_02
+        # No login of its own -- depends on 01-boot-login's persisted GoTrue
+        # session (no runFlow, no clearState; see the flow file's header).
+        # Still gated with always() rather than a success()-on-01 dependency:
+        # a failed/timed-out 01 should not SKIP 02, it should let 02 fail on
+        # its own terms (bounded by its own timeout) so the per-flow outcome
+        # table stays honest about what actually happened.
+        if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '02-map-and-tabs.yaml') }}
+        timeout-minutes: 8
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/02-map-and-tabs
+          maestro test "$FLOWS_DIR/02-map-and-tabs.yaml" \
+            --format junit \
+            --output artifacts/maestro-report-02-map-and-tabs.xml \
+            --debug-output artifacts/maestro-debug-02-map-and-tabs
+          MAESTRO_EXIT=$?
+          mv ./*.png artifacts/seeded/02-map-and-tabs/ 2>/dev/null || true
+          echo "02-map-and-tabs exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
+      - name: "Run Maestro flow: 03-click-audit"
+        id: flow_03
+        if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '03-click-audit.yaml') }}
+        timeout-minutes: 20
+        env:
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/03-click-audit
+          maestro test "$FLOWS_DIR/03-click-audit.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-03-click-audit.xml \
+            --debug-output artifacts/maestro-debug-03-click-audit
+          MAESTRO_EXIT=$?
+          mv ./*.png artifacts/seeded/03-click-audit/ 2>/dev/null || true
+          echo "03-click-audit exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
+      - name: Clear simulated location (seeded -> no-location transition)
+        # Only fires on the flow=all (or blank) seeded->no-location
+        # transition. A standalone 04-no-location.yaml dispatch already had
+        # its location cleared in "Install app + seed location/permission"
+        # above, so this step is a no-op there and stays skipped.
+        if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '') }}
+        run: |
+          set -uo pipefail
+          echo "Clearing simulated location for 04-no-location.yaml"
+          xcrun simctl location "$SIM_UDID" clear || true
+
+      - name: "Run Maestro flow: 04-no-location"
+        id: flow_04
+        if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '04-no-location.yaml') }}
+        timeout-minutes: 16
+        env:
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/no-location/04-no-location
+          maestro test "$FLOWS_DIR/04-no-location.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-04-no-location.xml \
+            --debug-output artifacts/maestro-debug-04-no-location
+          MAESTRO_EXIT=$?
+          mv ./*.png artifacts/no-location/04-no-location/ 2>/dev/null || true
+          echo "04-no-location exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
+      - name: Stop screen recording + finalize artifacts
+        if: always()
+        run: |
+          set -uo pipefail
           mkdir -p artifacts
-
-          FLOW_INPUT="${{ github.event.inputs.flow }}"
-
-          # In-flow screenshots (takeScreenshot writes to CWD). 01-03 and
-          # 04-no-location.yaml both `runFlow: 01-boot-login.yaml`, so they
-          # reuse its screenshot names (01-welcome, 04-map, ...) -- move each
-          # phase's screenshots into their own artifacts/ subdir immediately
-          # after that phase runs, so the no-location phase's re-taken
-          # 01-welcome/04-map shots never clobber the seeded phase's.
-          collect_screenshots() {
-            mkdir -p "artifacts/$1"
-            mv ./*.png "artifacts/$1/" 2>/dev/null || true
-          }
-
-          # Start screen recording; we SIGINT + wait on it below so the mp4
-          # finalizes regardless of whether Maestro passes or fails.
-          xcrun simctl io "$SIM_UDID" recordVideo --codec h264 --force artifacts/run.mp4 &
-          REC_PID=$!
-          sleep 2
-
-          set +e
-          if [ "$FLOW_INPUT" = "all" ] || [ -z "$FLOW_INPUT" ]; then
-            echo "Maestro target: 01-03 (seeded Moscow location)"
-            maestro test \
-              "$FLOWS_DIR/01-boot-login.yaml" \
-              "$FLOWS_DIR/02-map-and-tabs.yaml" \
-              "$FLOWS_DIR/03-click-audit.yaml" \
-              -e DEMO_PHONE="$DEMO_PHONE" \
-              -e DEMO_OTP="$DEMO_OTP" \
-              --format junit \
-              --output artifacts/maestro-report-seeded.xml \
-              --debug-output artifacts/maestro-debug-seeded
-            EXIT_SEEDED=$?
-            collect_screenshots seeded
-
-            echo "Clearing simulated location for 04-no-location.yaml"
-            xcrun simctl location "$SIM_UDID" clear || true
-
-            echo "Maestro target: 04-no-location.yaml (no simulated location)"
-            maestro test "$FLOWS_DIR/04-no-location.yaml" \
-              -e DEMO_PHONE="$DEMO_PHONE" \
-              -e DEMO_OTP="$DEMO_OTP" \
-              --format junit \
-              --output artifacts/maestro-report-noloc.xml \
-              --debug-output artifacts/maestro-debug-noloc
-            EXIT_NOLOC=$?
-            collect_screenshots no-location
-
-            MAESTRO_EXIT=0
-            [ "$EXIT_SEEDED" -ne 0 ] && MAESTRO_EXIT=$EXIT_SEEDED
-            [ "$EXIT_NOLOC" -ne 0 ] && MAESTRO_EXIT=$EXIT_NOLOC
-          else
-            TARGET="$FLOWS_DIR/$FLOW_INPUT"
-            echo "Maestro target: $TARGET"
-            # 04-no-location.yaml standalone already had its location cleared
-            # in the "Install app + seed location/permission" step above.
-            maestro test "$TARGET" \
-              -e DEMO_PHONE="$DEMO_PHONE" \
-              -e DEMO_OTP="$DEMO_OTP" \
-              --format junit \
-              --output artifacts/maestro-report.xml \
-              --debug-output artifacts/maestro-debug
-            MAESTRO_EXIT=$?
+          if [ -f "$RUNNER_TEMP/popup-video.pid" ]; then
+            REC_PID="$(cat "$RUNNER_TEMP/popup-video.pid")"
+            kill -INT "$REC_PID" 2>/dev/null || true
+            for _ in $(seq 1 30); do
+              kill -0 "$REC_PID" 2>/dev/null || break
+              sleep 0.5
+            done
           fi
-          set -e
-          echo "Maestro exit code: $MAESTRO_EXIT"
-
-          # Stop the recording and wait for the file to flush/finalize.
-          kill -INT "$REC_PID" 2>/dev/null || true
-          for _ in $(seq 1 30); do
-            kill -0 "$REC_PID" 2>/dev/null || break
-            sleep 0.5
-          done
-
-          # Any remaining screenshots (non-"all" single-flow runs; the "all"
-          # branch already collected its two phases above) + final sim shot.
+          # Any screenshots not already claimed by a per-flow step above,
+          # plus a final full-screen sim shot.
           mv ./*.png artifacts/ 2>/dev/null || true
           xcrun simctl io "$SIM_UDID" screenshot artifacts/final.png || true
 
@@ -241,10 +313,6 @@ jobs:
           cp "$HOME/Library/Logs/DiagnosticReports/"*.ips artifacts/crash-reports/ 2>/dev/null || true
           echo "--- artifacts dir ---"
           ls -laR artifacts | head -n 80 || true
-
-          echo "MAESTRO_EXIT=$MAESTRO_EXIT" >> "$GITHUB_ENV"
-          # Do not fail this step — the always() steps below own upload + status.
-          exit 0
 
       - name: Stop syslog capture
         if: always()
@@ -282,7 +350,29 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          EXIT="${MAESTRO_EXIT:-1}"
+          O01="${{ steps.flow_01.outcome }}"
+          O02="${{ steps.flow_02.outcome }}"
+          O03="${{ steps.flow_03.outcome }}"
+          O04="${{ steps.flow_04.outcome }}"
+
+          EXIT=0
+          RAN_SOMETHING=0
+          for O in "$O01" "$O02" "$O03" "$O04"; do
+            if [ "$O" != "success" ] && [ "$O" != "skipped" ]; then
+              EXIT=1
+            fi
+            [ "$O" != "skipped" ] && RAN_SOMETHING=1
+          done
+          # All four flow steps skipped => the `flow` input matched none of
+          # the known filenames (typo/unrecognized value) -- nothing was
+          # actually verified. The original monolithic script would have
+          # let `maestro test` fail loudly on a bad filename; a silent
+          # all-skipped PASS here would be a false green, so fail instead.
+          if [ "$RAN_SOMETHING" -eq 0 ]; then
+            EXIT=1
+            echo "ERROR: flow input '${{ github.event.inputs.flow }}' matched no known flow -- nothing ran." >&2
+          fi
+
           {
             echo "## sim-verify result (public mirror)"
             echo ""
@@ -290,12 +380,20 @@ jobs:
             echo "- Simulator UDID: \`${SIM_UDID:-n/a}\`"
             echo "- Flow input: \`${{ github.event.inputs.flow }}\`"
             echo "- Artifact URL: ${{ github.event.inputs.artifact_url }}"
+            echo ""
+            echo "| Flow | Step outcome |"
+            echo "|------|--------------|"
+            echo "| 01-boot-login | ${O01:-n/a} |"
+            echo "| 02-map-and-tabs | ${O02:-n/a} |"
+            echo "| 03-click-audit | ${O03:-n/a} |"
+            echo "| 04-no-location | ${O04:-n/a} |"
+            echo ""
             if [ "$EXIT" = "0" ]; then
               echo "- **Maestro: PASS ✅**"
             else
-              echo "- **Maestro: FAIL ❌ (exit ${EXIT})**"
+              echo "- **Maestro: FAIL ❌ (one or more flow steps did not succeed — see table above)**"
             fi
             echo ""
-            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording), final.png, per-flow screenshots 01-*.png…20-*.png (under seeded/ and no-location/ subdirs when flow=all), maestro-debug*/ (per-step logs + on-failure screenshots), maestro-report*.xml (JUnit — split into -seeded/-noloc variants when flow=all)."
+            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording spanning all flows), final.png, per-flow screenshots under seeded/01-boot-login/, seeded/02-map-and-tabs/, seeded/03-click-audit/, no-location/04-no-location/ (present only for flows actually run), maestro-debug-<flow>/ (per-flow debug logs + on-failure screenshots), maestro-report-<flow>.xml (per-flow JUnit)."
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$EXIT"
