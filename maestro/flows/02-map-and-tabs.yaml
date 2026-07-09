@@ -1,0 +1,44 @@
+# 02-map-and-tabs.yaml — post-login surface sweep (tab-bar navigation).
+#
+# Depends on 01-boot-login having run first in the same `maestro test`
+# invocation: it launches WITHOUT clearState so the persisted GoTrue session
+# (supabase-js storage adapter) restores straight onto MainTabs/Map. If run
+# standalone with no prior session it will land on Welcome and the first
+# assertion will (correctly) fail.
+#
+# Assertions are deliberately loose (visible-element / screen-anchor checks):
+# tap each tab icon by testID, confirm a screen-specific anchor appeared.
+# Tab *labels* ("Карта"/"Друзья"/"Настройки") are always present in the tab
+# bar, so they can't confirm navigation — we assert per-screen testIDs
+# instead (friends-header, settings-profile-name-row).
+appId: com.popupgram.ios
+---
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "main-tabs-button-map"
+    timeout: 90000
+- takeScreenshot: 05-tabs-map
+# Friends tab -> friends-header is the FriendsScreen-specific anchor.
+- tapOn:
+    id: "main-tabs-button-friends"
+- extendedWaitUntil:
+    visible:
+      id: "friends-header"
+    timeout: 30000
+- takeScreenshot: 06-friends
+# Settings tab -> the profile-name row is a SettingsScreen-specific anchor
+# (near the top of the ScrollView).
+- tapOn:
+    id: "main-tabs-button-settings"
+- extendedWaitUntil:
+    visible:
+      id: "settings-profile-name-row"
+    timeout: 30000
+- takeScreenshot: 07-settings
+# Back to Map.
+- tapOn:
+    id: "main-tabs-button-map"
+- assertVisible:
+    id: "main-tabs-button-map"
+- takeScreenshot: 08-map-again

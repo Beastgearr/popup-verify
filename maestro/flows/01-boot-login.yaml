@@ -1,0 +1,104 @@
+# 01-boot-login.yaml — cold-boot + demo login smoke test.
+#
+# Drives: Welcome (welcome-cta) -> AuthMethods (auth-methods-continue-phone)
+# -> phone entry (${DEMO_PHONE}) -> OTP (${DEMO_OTP}) -> post-auth MainTabs
+# (Map). Uses a seeded Test-OTP demo account against the popup-demo backend
+# baked into the EAS build (see
+# obsidianPOPUP/POPUP/Claude/Research/Infrastructure/2026-07-04-see-it-first-demo-walkthrough.md).
+#
+# Credentials are NOT hardcoded here — DEMO_PHONE (10 digits, no +7 prefix)
+# and DEMO_OTP are injected via `maestro test -e DEMO_PHONE=... -e
+# DEMO_OTP=...` (see .github/workflows/sim-verify.yml). This lets the flow
+# be synced verbatim into the public sim-verify mirror repo without leaking
+# demo credentials; the public workflow injects them from
+# ${{ secrets.DEMO_PHONE }} / ${{ secrets.DEMO_OTP }}.
+#
+# Selector policy: UI is RU-primary, so buttons are matched by testID
+# (RN testID -> iOS accessibilityIdentifier) where one exists; screen
+# transitions are gated on the RU title strings. Both phone and OTP
+# TextInputs set autoFocus, so `inputText` types straight into them once
+# the screen has rendered — no field tap needed.
+#
+# 2026-07-08 auth-entry redesign: WelcomeScreen's CTA copy changed from
+# "Начать" to "Зарегистрироваться или войти" (shortened again to
+# "Регистрация или вход" in the 2026-07-09 v1-completeness copy audit) and
+# now routes through a new AuthMethodsScreen ("Как хочешь продолжить?")
+# before PhoneEntry. The flow taps the stable testIDs (welcome-cta,
+# auth-methods-continue-phone) instead of copy so this doesn't re-drift
+# with the next i18n edit.
+appId: com.popupgram.ios
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: "welcome-cta"
+    timeout: 120000
+- takeScreenshot: 01-welcome
+- tapOn:
+    id: "welcome-cta"
+# AuthMethods screen. Title "Как хочешь продолжить?" confirms we navigated;
+# tap the phone-continue CTA to land on PhoneEntry.
+- extendedWaitUntil:
+    visible: "Как хочешь продолжить?"
+    timeout: 30000
+- takeScreenshot: 01b-auth-methods
+- tapOn:
+    id: "auth-methods-continue-phone"
+# Phone-entry screen. Title "Введи номер" confirms we navigated; the digits
+# field is autofocused. Type the 10 digits after the locked +7 prefix.
+- extendedWaitUntil:
+    visible: "Введи номер"
+    timeout: 30000
+- waitForAnimationToEnd:
+    timeout: 5000
+- inputText: ${DEMO_PHONE}
+# The "Получить код" button is bottom-pinned (ctaWrap marginTop:auto).
+# PhoneEntryScreen now wraps its content in a KeyboardAvoidingView (behavior
+# "padding" on iOS, commit 85931e9) so the CTA should already clear the
+# keyboard on its own; the hardware Return here is kept as belt-and-
+# suspenders in case KAV's animation races the keyboard's — it also blurs
+# the single-line TextInput (blurOnSubmit default), dismissing the keyboard;
+# the typed value persists in the form either way.
+- pressKey: Enter
+- waitForAnimationToEnd:
+    timeout: 5000
+- takeScreenshot: 02-phone
+- tapOn:
+    id: "phone-submit"
+# OTP screen. auth-otp-send is a network round-trip (Test-OTP path, no real
+# SMS) so allow a generous wait for "Введи код". Fixed demo code injected
+# via ${DEMO_OTP} (see header note).
+- extendedWaitUntil:
+    visible: "Введи код"
+    timeout: 60000
+- waitForAnimationToEnd:
+    timeout: 5000
+- inputText: ${DEMO_OTP}
+# Same belt-and-suspenders keyboard-dismiss for the OTP screen's
+# bottom-pinned "Войти" button — VerifyOtpScreen also wraps its content in a
+# KeyboardAvoidingView now (commit 85931e9); Enter is kept in case KAV's
+# animation races the keyboard's.
+- pressKey: Enter
+- waitForAnimationToEnd:
+    timeout: 5000
+- takeScreenshot: 03-otp
+- tapOn:
+    id: "otp-submit"
+# Post-auth: seeded profiles are pre-completed, so ProfileGate routes
+# straight to MainTabs (not onboarding). The bottom tab bar mounting is the
+# load-bearing success signal — it is present regardless of whether the
+# Mapbox token baked into the build (a blank/placeholder map would still
+# show the tabs). Assert the map tab icon, then the map tab *button*
+# (icon + RU "Карта" label) by testID. This used to assertVisible the
+# "Карта" label text directly, but that flaked in CI on builds #7/#8 even
+# though the label visibly rendered (known Maestro text-assert flow
+# artifact) — main-tabs-button-map (tabBarButtonTestID, MainTabs.tsx)
+# covers the same tab-bar entry via a stable selector instead.
+- extendedWaitUntil:
+    visible:
+      id: "main-tabs-button-map-icon"
+    timeout: 90000
+- assertVisible:
+    id: "main-tabs-button-map"
+- takeScreenshot: 04-map

@@ -1,0 +1,246 @@
+name: sim-verify
+
+# Public-mirror twin of the private repo's .github/workflows/sim-verify.yml,
+# for the Beastgearr/popup-verify public repo (free GitHub-hosted macOS
+# runner minutes — the private repo's free Actions quota is exhausted and
+# the founder will not pay).
+#
+# CANONICAL SOURCE: this file, at scripts/mirror/sim-verify.yml in the
+# private POPUP repo. Edit HERE, then run scripts/sync-verify-mirror.ps1 to
+# push the copy into the public repo's .github/workflows/sim-verify.yml.
+# Do not hand-edit the workflow directly in the public repo — the next sync
+# will silently overwrite it.
+#
+# Differences from the private workflow:
+#   - No sparse-checkout of a private repo: this repo IS the maestro/ dir
+#     (synced from app/PopUp/maestro/** in the private repo).
+#   - DEMO_PHONE / DEMO_OTP are injected from this repo's own Actions
+#     secrets (${{ secrets.DEMO_PHONE }} / ${{ secrets.DEMO_OTP }}) instead
+#     of a plaintext env block — this repo is public, the private repo's
+#     plaintext posture is not.
+#   - No default artifact_url — every dispatch must pass one explicitly.
+#
+# Everything else (simulator boot, app install, Maestro invocation, video +
+# screenshot capture, crash-report collection, artifact upload, job
+# summary) is identical to the private lane.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: "EAS iOS simulator build .tar.gz URL (applicationArchiveUrl from `eas build:list --platform ios --json`)"
+        required: true
+      flow:
+        description: "Maestro flow to run: 'all' (whole flows dir) or a single filename e.g. 01-boot-login.yaml"
+        required: false
+        default: "all"
+
+jobs:
+  sim-verify:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      APP_ID: com.popupgram.ios
+      FLOWS_DIR: maestro/flows
+    steps:
+      - name: Checkout (maestro flows + this workflow)
+        uses: actions/checkout@v4
+
+      - name: Set up Java (Maestro runtime)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download EAS simulator tarball
+        run: |
+          set -euo pipefail
+          echo "Downloading: ${{ github.event.inputs.artifact_url }}"
+          curl -fL --retry 3 --retry-delay 5 -o app.tar.gz "${{ github.event.inputs.artifact_url }}"
+          ls -lh app.tar.gz
+          test -s app.tar.gz
+
+      - name: Extract .app bundle
+        run: |
+          set -euo pipefail
+          mkdir -p app_extract
+          tar -xzf app.tar.gz -C app_extract
+          APP_PATH="$(find app_extract -maxdepth 4 -name '*.app' -type d | head -n 1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: no .app bundle found in tarball. Contents:"
+            find app_extract -maxdepth 4 | head -n 50
+            exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "Found app: $APP_PATH"
+
+      - name: Boot iOS simulator
+        run: |
+          set -euo pipefail
+          echo "--- runtimes ---"
+          xcrun simctl list runtimes
+          # Pick an available iPhone dynamically — never hardcode a device name
+          # that might not exist on the runner image. Take the last available
+          # iPhone across iOS runtimes (jq is preinstalled on macOS runners).
+          UDID="$(xcrun simctl list devices available --json \
+            | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.isAvailable and (.name | test("iPhone")))] | (.[-1].udid // "")')"
+          if [ -z "$UDID" ]; then
+            echo "ERROR: no available iPhone simulator found."
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Booting simulator UDID=$UDID"
+          # Belt: ask Simulator to connect a virtual hardware keyboard so the
+          # software keyboard doesn't appear to cover bottom-pinned buttons.
+          # Reported flaky across Xcode versions, so the Maestro flow also
+          # dismisses the keyboard with a hardware Return (pressKey: Enter).
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool true || true
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID"
+          open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Install app + seed location/permission
+        run: |
+          set -euo pipefail
+          xcrun simctl install "$SIM_UDID" "$APP_PATH"
+          # Moscow default so <UserLocation> can render a self-dot on the map.
+          xcrun simctl location "$SIM_UDID" set 55.7558,37.6173 || true
+          xcrun simctl privacy "$SIM_UDID" grant location-always "$APP_ID" || true
+
+      - name: Install Maestro
+        run: |
+          set -euo pipefail
+          curl -Ls https://get.maestro.mobile.dev | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          "$HOME/.maestro/bin/maestro" --version || true
+
+      - name: Start syslog capture (background)
+        # Diagnostic instrumentation: prior .ips crash reports had
+        # exceptionReason: null, so the NSException name/reason has to come
+        # from the unified log instead. Backgrounded within this step; killed
+        # by PID file in the always()-gated step below, since GitHub Actions
+        # runs each `run:` block as its own shell (can't background across
+        # steps directly).
+        run: |
+          set -euo pipefail
+          xcrun simctl spawn "$SIM_UDID" log stream --predicate 'process == "PopUp"' --style compact > "$RUNNER_TEMP/popup-syslog.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/popup-syslog.pid"
+
+      - name: Run Maestro walkthrough (+ record video)
+        env:
+          # Public repo — no plaintext credentials in the workflow. Set via:
+          #   gh secret set DEMO_PHONE -R Beastgearr/popup-verify
+          #   gh secret set DEMO_OTP -R Beastgearr/popup-verify
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts
+
+          FLOW_INPUT="${{ github.event.inputs.flow }}"
+          if [ "$FLOW_INPUT" = "all" ] || [ -z "$FLOW_INPUT" ]; then
+            TARGET="$FLOWS_DIR"
+          else
+            TARGET="$FLOWS_DIR/$FLOW_INPUT"
+          fi
+          echo "Maestro target: $TARGET"
+
+          # Start screen recording; we SIGINT + wait on it below so the mp4
+          # finalizes regardless of whether Maestro passes or fails.
+          xcrun simctl io "$SIM_UDID" recordVideo --codec h264 --force artifacts/run.mp4 &
+          REC_PID=$!
+          sleep 2
+
+          set +e
+          maestro test "$TARGET" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report.xml \
+            --debug-output artifacts/maestro-debug
+          MAESTRO_EXIT=$?
+          set -e
+          echo "Maestro exit code: $MAESTRO_EXIT"
+
+          # Stop the recording and wait for the file to flush/finalize.
+          kill -INT "$REC_PID" 2>/dev/null || true
+          for _ in $(seq 1 30); do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 0.5
+          done
+
+          # In-flow screenshots (takeScreenshot writes to CWD) + final sim shot.
+          mv ./*.png artifacts/ 2>/dev/null || true
+          xcrun simctl io "$SIM_UDID" screenshot artifacts/final.png || true
+
+          # Belt: Maestro also writes per-command logs + on-failure screenshots
+          # under ~/.maestro/tests/<timestamp>/ — copy them in so a failed run is
+          # always diagnosable even if --debug-output didn't materialize.
+          cp -R "$HOME/.maestro/tests" artifacts/maestro-tests 2>/dev/null || true
+          # Native crash reports (a Maestro "App crashed or stopped" failure
+          # points here) — copy any app crash .ips into the bundle. Small +
+          # targeted (not a full `simctl diagnose`, which would bloat the job).
+          mkdir -p artifacts/crash-reports
+          cp "$HOME/Library/Logs/DiagnosticReports/"*.ips artifacts/crash-reports/ 2>/dev/null || true
+          echo "--- artifacts dir ---"
+          ls -laR artifacts | head -n 80 || true
+
+          echo "MAESTRO_EXIT=$MAESTRO_EXIT" >> "$GITHUB_ENV"
+          # Do not fail this step — the always() steps below own upload + status.
+          exit 0
+
+      - name: Stop syslog capture
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -f "$RUNNER_TEMP/popup-syslog.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/popup-syslog.pid")" 2>/dev/null || true
+          fi
+          sleep 2
+          mkdir -p artifacts
+          cp "$RUNNER_TEMP/popup-syslog.txt" artifacts/popup-syslog.txt 2>/dev/null || true
+          exit 0
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-verify-${{ github.run_id }}
+          path: artifacts/**
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Upload syslog
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: popup-syslog-${{ github.run_id }}
+          path: ${{ runner.temp }}/popup-syslog.txt
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+
+      - name: Job summary + status
+        if: always()
+        run: |
+          set -uo pipefail
+          EXIT="${MAESTRO_EXIT:-1}"
+          {
+            echo "## sim-verify result (public mirror)"
+            echo ""
+            echo "- App: \`${APP_ID}\`"
+            echo "- Simulator UDID: \`${SIM_UDID:-n/a}\`"
+            echo "- Flow input: \`${{ github.event.inputs.flow }}\`"
+            echo "- Artifact URL: ${{ github.event.inputs.artifact_url }}"
+            if [ "$EXIT" = "0" ]; then
+              echo "- **Maestro: PASS ✅**"
+            else
+              echo "- **Maestro: FAIL ❌ (exit ${EXIT})**"
+            fi
+            echo ""
+            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording), final.png, per-flow screenshots 01-*.png…08-*.png, maestro-debug/ (per-step logs + on-failure screenshots), maestro-report.xml (JUnit)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$EXIT"
