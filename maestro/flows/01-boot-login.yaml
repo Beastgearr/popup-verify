@@ -26,6 +26,17 @@
 # before PhoneEntry. The flow taps the stable testIDs (welcome-cta,
 # auth-methods-continue-phone) instead of copy so this doesn't re-drift
 # with the next i18n edit.
+#
+# 2026-07-09 char-drop hardening (v1-final-polish slice S5-d): run
+# 29037752215 showed `inputText` into the phone field drop 3 of 10 digits on
+# a loaded public runner (field ended up "9001111" -> "Неверный формат"),
+# plausibly worsened by the NeonBubblesBackground Reanimated organism running
+# behind all 4 auth screens contending for the JS thread mid-type. After
+# typing, the flow now asserts the phone field's rendered text actually holds
+# the full ${DEMO_PHONE} value and, if not, erases + retypes once via a
+# conditional `runFlow: when: notVisible:` branch -- deterministic, no fixed
+# sleep. A healthy run (green 29039997885, 9m48s for this flow) never enters
+# that branch.
 appId: com.popupgram.ios
 ---
 - launchApp:
@@ -53,6 +64,24 @@ appId: com.popupgram.ios
 - waitForAnimationToEnd:
     timeout: 5000
 - inputText: ${DEMO_PHONE}
+# Char-drop retry (see header note): PhoneInputGroup's underlying TextInput
+# is `phone-input-group-field-input` (TextField atom appends `-input`; the
+# molecule's own testID is `phone-input-group-field`). If the rendered text
+# doesn't already match the full ${DEMO_PHONE}, erase and retype once, then
+# hard-assert the field is correct before continuing -- a still-wrong value
+# here should fail the flow loudly rather than silently submit a malformed
+# number.
+- runFlow:
+    when:
+      notVisible:
+        id: "phone-input-group-field-input"
+        text: "${DEMO_PHONE}"
+    commands:
+      - eraseText
+      - inputText: ${DEMO_PHONE}
+- assertVisible:
+    id: "phone-input-group-field-input"
+    text: "${DEMO_PHONE}"
 # The "Получить код" button is bottom-pinned (ctaWrap marginTop:auto).
 # PhoneEntryScreen now wraps its content in a KeyboardAvoidingView (behavior
 # "padding" on iOS, commit 85931e9) so the CTA should already clear the

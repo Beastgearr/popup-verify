@@ -1,0 +1,44 @@
+# 04-no-location.yaml — Moscow-fallback proof, no simulator GPS seed
+# (v1-final-polish slice S5-c).
+#
+# Reproduces the PopUp15 blank-void-map scenario George saw on a Sauce Labs
+# iPhone virtual device: a sim with no simulated location ever set (not
+# "permission denied" -- CoreLocation just never resolves a fix) used to leave
+# the map camera parked on nothing, with no basemap tiles visible. S1-a fixed
+# this with an explicit Moscow-center camera fallback (`MOSCOW_CENTER` /
+# `MOSCOW_DEFAULT_ZOOM`, src/config/geo.ts) that fires on mount whenever
+# `locationStatus !== 'granted'` or no GPS fix has arrived yet, gated by the
+# same `hasCenteredRef` the real GPS-follow recenter uses so exactly one wins.
+#
+# Orchestration seam (IMPORTANT): Maestro flows cannot call `simctl` --
+# clearing the simulator's simulated location has to happen at the CI/runner
+# level, before this flow's `launchApp` runs. .github/workflows/sim-verify.yml
+# (and its public-mirror twin scripts/mirror/sim-verify.yml) special-case
+# `flow: 04-no-location.yaml` / the tail of `flow: all` to run
+# `xcrun simctl location <UDID> clear` before invoking this file, instead of
+# the usual `xcrun simctl location <UDID> set 55.7558,37.6173` seed. Running
+# this file directly against a simulator that still has a seeded location
+# will NOT reproduce the bug -- it only proves the fallback doesn't regress
+# the GPS-present path (still a valid, if weaker, check).
+#
+# Self-contained: reuses 01-boot-login.yaml via `runFlow` (login is identical
+# whether or not a location is seeded -- GoTrue/Test-OTP auth doesn't touch
+# CoreLocation) so this flow can run standalone
+# (`-f flow=04-no-location.yaml`) or as the tail of `flow=all`.
+appId: com.popupgram.ios
+---
+- runFlow: 01-boot-login.yaml
+# 01-boot-login.yaml's last step already waits for the tab bar
+# (main-tabs-button-map-icon) and screenshots the freshly-landed Map screen.
+# The assertions below are the actual no-location proof: the map view itself
+# renders (Mapbox tiles aren't location-gated) AND stable chrome -- the
+# filter-chip row and the venue band -- are visible, meaning the screen isn't
+# a blank void and didn't crash trying to center a camera on a location that
+# never arrived.
+- assertVisible:
+    id: "map-view"
+- assertVisible:
+    id: "map-filter-chips"
+- assertVisible:
+    id: "venue-carousel-band"
+- takeScreenshot: 20-no-location-map

@@ -1,0 +1,157 @@
+# 03-click-audit.yaml — click-audit smoke pass (v1-final-polish slice S5-b).
+#
+# Taps every major interactive surface the v1-final-polish wave touched (or
+# locked a testID for) and asserts a destination-specific testID after each
+# tap: filter chips, the venue carousel -> VenueDetailSheet -> create CTA ->
+# create sheet, the FAB -> create sheet, a friend row -> UserProfileScreen,
+# and Settings' Help row -> FaqScreen (+ back-out) plus a Legal row ->
+# LegalDocumentScreen.
+#
+# Self-contained: reuses 01-boot-login.yaml via `runFlow` for the login
+# sequence (including its char-drop hardening) so this flow is runnable
+# standalone (`-f flow=03-click-audit.yaml`) or as part of `flow=all`,
+# without assuming a prior flow already left a session behind.
+#
+# Every testID referenced below was confirmed to exist in app/PopUp/src via
+# grep before being used here (see the v1-final-polish plan §1.4 LOCKED
+# testID table + the S3/S4 organisms). Every bottom sheet this flow opens is
+# dismissed via a pan-down-to-close swipe (@gorhom/bottom-sheet
+# BottomSheetModal defaults `enablePanDownToClose` to true) -- this flow
+# NEVER taps `sheet-submit`, so it never creates a real pop-up against the
+# live popup-demo backend.
+#
+# Friend-row selector: `friend-row-{friend_id}` is keyed by a UUID, so this
+# flow matches any row via a hex-prefixed regex
+# (`friend-row-[0-9a-fA-F]{8}-.*`) instead of hardcoding a specific demo
+# friend_id. `friend-row-streak` and `friend-row-skeleton` (the other two
+# `friend-row-*`-prefixed testIDs in the codebase) don't start with 8 hex
+# digits, so the regex stays unambiguous; `index: 0` picks the first (topmost)
+# match.
+appId: com.popupgram.ios
+---
+- runFlow: 01-boot-login.yaml
+
+# --- Map tab: filter chips (All/Friends/Close) -- smoke pass. Tapping a chip
+# doesn't navigate anywhere (pure client-side filter state), so "destination"
+# here is "the chip row survives the tap and every chip is still reachable" --
+# reset back to "all" at the end so later steps see the unfiltered dot set. ---
+- tapOn:
+    id: "map-filter-friends"
+- assertVisible:
+    id: "map-filter-friends"
+- tapOn:
+    id: "map-filter-close_friends"
+- assertVisible:
+    id: "map-filter-close_friends"
+- tapOn:
+    id: "map-filter-all"
+- assertVisible:
+    id: "map-filter-all"
+- takeScreenshot: 09-click-audit-filters
+
+# --- Venue chip -> VenueDetailSheet -> create CTA -> create sheet ---
+# Propaganda is one of the three seeded venues carrying a fixed `venueId`
+# (plan §1.2), so its sheet always has visitor data to render.
+- tapOn:
+    id: "venue-chip-propaganda"
+- extendedWaitUntil:
+    visible:
+      id: "venue-detail-sheet"
+    timeout: 15000
+- assertVisible:
+    id: "venue-detail-name"
+- takeScreenshot: 10-click-audit-venue-sheet
+- tapOn:
+    id: "venue-detail-create-cta"
+# Documented expected path (plan §S3-c): with no live/planned pop-up on the
+# demo account, the create CTA opens the plain create form (`create-header`).
+# If a prior demo session left a live/planned pop-up active, "live-dominates"
+# routing would show `live-manage-header` / `planned-manage-header` instead --
+# a known, accepted seam; this flow targets the documented happy path only.
+- extendedWaitUntil:
+    visible:
+      id: "create-header"
+    timeout: 15000
+- takeScreenshot: 11-click-audit-venue-create-sheet
+# Dismiss WITHOUT submitting -- pan-down-to-close swipe, never `sheet-submit`.
+- swipe:
+    start: 50%, 55%
+    end: 50%, 98%
+- waitForAnimationToEnd:
+    timeout: 5000
+- assertNotVisible:
+    id: "create-header"
+
+# --- FAB -> create sheet ---
+- tapOn:
+    id: "create-pop-up-fab"
+- extendedWaitUntil:
+    visible:
+      id: "create-header"
+    timeout: 15000
+- takeScreenshot: 12-click-audit-fab-create-sheet
+- swipe:
+    start: 50%, 55%
+    end: 50%, 98%
+- waitForAnimationToEnd:
+    timeout: 5000
+- assertNotVisible:
+    id: "create-header"
+
+# --- Friends tab: friend row -> UserProfileScreen ---
+- tapOn:
+    id: "main-tabs-button-friends"
+- extendedWaitUntil:
+    visible:
+      id: "friends-header"
+    timeout: 30000
+- tapOn:
+    id: "friend-row-[0-9a-fA-F]{8}-.*"
+    index: 0
+- extendedWaitUntil:
+    visible:
+      id: "user-profile-screen"
+    timeout: 15000
+- takeScreenshot: 13-click-audit-user-profile
+- tapOn:
+    id: "user-profile-back-button"
+- extendedWaitUntil:
+    visible:
+      id: "friends-header"
+    timeout: 15000
+
+# --- Settings tab: Help row -> FaqScreen (+ back-out); a Legal row -> LegalDocumentScreen ---
+- tapOn:
+    id: "main-tabs-button-settings"
+- extendedWaitUntil:
+    visible:
+      id: "settings-profile-name-row"
+    timeout: 30000
+- tapOn:
+    id: "settings-help-row"
+- extendedWaitUntil:
+    visible:
+      id: "faq-screen"
+    timeout: 15000
+- assertVisible:
+    id: "faq-item-0"
+- takeScreenshot: 14-click-audit-faq
+- tapOn:
+    id: "faq-back-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-profile-name-row"
+    timeout: 15000
+- tapOn:
+    id: "settings-legal-terms-row"
+- extendedWaitUntil:
+    visible:
+      id: "legal-document-screen"
+    timeout: 15000
+- takeScreenshot: 15-click-audit-legal
+- tapOn:
+    id: "legal-document-back-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-profile-name-row"
+    timeout: 15000
