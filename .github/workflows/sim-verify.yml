@@ -195,6 +195,14 @@ jobs:
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
           mkdir -p artifacts/seeded/01-boot-login
+          # GH Actions runs `run:` blocks as `bash -e {0}` -- errexit is ON
+          # by default, regardless of this script's own `set` flags. Without
+          # this set +e/set -e bracket, a FAILING maestro invocation aborts
+          # the script immediately (skipping MAESTRO_EXIT=$?, the screenshot
+          # mv below, and the trailing `exit` line entirely) -- the step
+          # still reports failure correctly (bash inherits maestro's exit
+          # code), but per-flow screenshot bucketing silently never runs.
+          set +e
           maestro test "$FLOWS_DIR/01-boot-login.yaml" \
             -e DEMO_PHONE="$DEMO_PHONE" \
             -e DEMO_OTP="$DEMO_OTP" \
@@ -202,6 +210,7 @@ jobs:
             --output artifacts/maestro-report-01-boot-login.xml \
             --debug-output artifacts/maestro-debug-01-boot-login
           MAESTRO_EXIT=$?
+          set -e
           mv ./*.png artifacts/seeded/01-boot-login/ 2>/dev/null || true
           echo "01-boot-login exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
@@ -220,11 +229,15 @@ jobs:
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
           mkdir -p artifacts/seeded/02-map-and-tabs
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
           maestro test "$FLOWS_DIR/02-map-and-tabs.yaml" \
             --format junit \
             --output artifacts/maestro-report-02-map-and-tabs.xml \
             --debug-output artifacts/maestro-debug-02-map-and-tabs
           MAESTRO_EXIT=$?
+          set -e
           mv ./*.png artifacts/seeded/02-map-and-tabs/ 2>/dev/null || true
           echo "02-map-and-tabs exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
@@ -240,6 +253,9 @@ jobs:
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
           mkdir -p artifacts/seeded/03-click-audit
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
           maestro test "$FLOWS_DIR/03-click-audit.yaml" \
             -e DEMO_PHONE="$DEMO_PHONE" \
             -e DEMO_OTP="$DEMO_OTP" \
@@ -247,6 +263,7 @@ jobs:
             --output artifacts/maestro-report-03-click-audit.xml \
             --debug-output artifacts/maestro-debug-03-click-audit
           MAESTRO_EXIT=$?
+          set -e
           mv ./*.png artifacts/seeded/03-click-audit/ 2>/dev/null || true
           echo "03-click-audit exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
@@ -273,6 +290,9 @@ jobs:
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
           mkdir -p artifacts/no-location/04-no-location
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
           maestro test "$FLOWS_DIR/04-no-location.yaml" \
             -e DEMO_PHONE="$DEMO_PHONE" \
             -e DEMO_OTP="$DEMO_OTP" \
@@ -280,6 +300,7 @@ jobs:
             --output artifacts/maestro-report-04-no-location.xml \
             --debug-output artifacts/maestro-debug-04-no-location
           MAESTRO_EXIT=$?
+          set -e
           mv ./*.png artifacts/no-location/04-no-location/ 2>/dev/null || true
           echo "04-no-location exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
