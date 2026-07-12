@@ -71,8 +71,11 @@ on:
   workflow_dispatch:
     inputs:
       artifact_url:
-        description: "EAS iOS simulator build .tar.gz URL (applicationArchiveUrl from `eas build:list --platform ios --json`)"
-        required: true
+        description: "EAS iOS simulator build .tar.gz URL (applicationArchiveUrl from `eas build:list --platform ios --json`). Leave empty when passing build_run_id."
+        required: false
+      build_run_id:
+        description: "ios-build.yml run id in this repo to pull the popup-sim-build artifact from (free-lane builds, 2026-07-12). Takes precedence over artifact_url; exactly one of the two must be provided."
+        required: false
       flow:
         description: "Maestro flow to run: 'all' (01-04, per-flow steps) or a single filename e.g. 01-boot-login.yaml. 04-no-location.yaml always runs with the simulated location cleared, seeded or standalone."
         required: false
@@ -95,11 +98,34 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Download EAS simulator tarball
+      # Two artifact sources (2026-07-12): an ios-build.yml run in this repo
+      # (free lane, preferred since the EAS iOS build quota ran out) or a
+      # direct EAS artifact URL (legacy). gh is preinstalled on the runner;
+      # github.token carries actions:read for same-repo artifact download.
+      - name: Fetch simulator app tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "Downloading: ${{ github.event.inputs.artifact_url }}"
-          curl -fL --retry 3 --retry-delay 5 -o app.tar.gz "${{ github.event.inputs.artifact_url }}"
+          BUILD_RUN_ID="${{ github.event.inputs.build_run_id }}"
+          ARTIFACT_URL="${{ github.event.inputs.artifact_url }}"
+          if [ -n "$BUILD_RUN_ID" ]; then
+            echo "Downloading popup-sim-build artifact from ios-build run $BUILD_RUN_ID"
+            gh run download "$BUILD_RUN_ID" -n popup-sim-build -D build_artifact -R "$GITHUB_REPOSITORY"
+            TARBALL="$(find build_artifact -name '*.tar.gz' -type f | head -n 1)"
+            if [ -z "$TARBALL" ]; then
+              echo "ERROR: no .tar.gz in the popup-sim-build artifact. Contents:"
+              find build_artifact -maxdepth 3 | head -n 20
+              exit 1
+            fi
+            mv "$TARBALL" app.tar.gz
+          elif [ -n "$ARTIFACT_URL" ]; then
+            echo "Downloading: $ARTIFACT_URL"
+            curl -fL --retry 3 --retry-delay 5 -o app.tar.gz "$ARTIFACT_URL"
+          else
+            echo "ERROR: provide either build_run_id or artifact_url"
+            exit 1
+          fi
           ls -lh app.tar.gz
           test -s app.tar.gz
 

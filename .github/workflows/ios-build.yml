@@ -1,0 +1,143 @@
+name: ios-build
+
+# Free-lane iOS simulator build for the private Beastgearr/POPUP app --
+# stood up 2026-07-12 when the EAS free-plan iOS build quota ran out
+# mid-launch-sprint (reset Aug 1). Public-repo macOS runner minutes are
+# free/unmetered, so this lane is quota-free and permanent; EAS cloud
+# builds become optional rather than load-bearing.
+#
+# CANONICAL SOURCE: scripts/mirror/ios-build.yml in the private POPUP repo.
+# Edit THERE, then run scripts/sync-verify-mirror.ps1 to push the copy into
+# the public repo's .github/workflows/ios-build.yml. Do not hand-edit the
+# workflow directly in the public repo -- the next sync will silently
+# overwrite it.
+#
+# What it does: clones the private source at the requested ref via a
+# read-only deploy key, replicates the EAS pre-install contract
+# (scripts/eas-build-pre-install.js: Mapbox .netrc entry + the gitignored
+# src/config/mapbox.ts + observability.ts generated from env), pod-installs
+# with PRODUCTION=1 (release-flavor Hermes -- debug Hermes in a Release
+# build is a documented past launch-crash cause), and produces an UNSIGNED
+# Release iphonesimulator .app packaged as a tar.gz with the same shape as
+# an EAS simulator artifact. Consumers:
+#   - sim-verify.yml in this repo, via its build_run_id input
+#   - the local bsdtar -> Sauce Labs upload lane, via `gh run download`
+#
+# Security posture (matches the ratified sim-verify mirror envelope):
+# source is cloned onto the ephemeral runner only and never enters this
+# repo's git; the deploy key is read-only, single-repo, revocable; the
+# compiled .app artifact is as public as the EAS artifact URLs already
+# sitting in this repo's run logs. workflow_dispatch is collaborator-only
+# and fork PRs never see secrets.
+#
+# Secrets used (this repo's Actions secrets):
+#   POPUP_DEPLOY_KEY        read-only deploy key for the private source
+#   MAPBOX_DOWNLOADS_TOKEN  sk.* downloads:read token for pod install
+#   MAPBOX_PUBLIC_TOKEN     pk.* runtime token baked into src/config/mapbox.ts
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref of the private repo to build"
+        required: false
+        default: "main"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: app/PopUp
+    steps:
+      - name: Checkout private source (read-only deploy key)
+        uses: actions/checkout@v4
+        with:
+          repository: Beastgearr/POPUP
+          ref: ${{ github.event.inputs.ref }}
+          ssh-key: ${{ secrets.POPUP_DEPLOY_KEY }}
+
+      - name: Record built commit
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short HEAD)"
+          echo "BUILT_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "BUILT_SHORT=$SHORT" >> "$GITHUB_ENV"
+          echo "Building $SHA (ref: ${{ github.event.inputs.ref }})"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/PopUp/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      # EAS lifecycle hooks do not fire outside EAS -- invoke the pre-install
+      # script manually. It writes the api.mapbox.com .netrc entry (pod
+      # install auth for the private Mapbox SDK binary) and generates the
+      # gitignored config modules, baking the real pk.* token from env
+      # (process.env is NOT inlined into the JS bundle -- the generated file
+      # is the only way the token reaches the running app).
+      - name: EAS pre-install contract (netrc + generated config)
+        env:
+          MAPBOX_DOWNLOADS_TOKEN: ${{ secrets.MAPBOX_DOWNLOADS_TOKEN }}
+          MAPBOX_PUBLIC_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
+          PRODUCTION: "1"
+        run: node scripts/eas-build-pre-install.js
+
+      - name: bundle install (pinned CocoaPods)
+        run: bundle install
+
+      - name: pod install (PRODUCTION=1 -> release Hermes)
+        working-directory: app/PopUp/ios
+        env:
+          PRODUCTION: "1"
+        run: bundle exec pod install
+
+      # Unsigned simulator build: the project sets CODE_SIGN_IDENTITY only
+      # for [sdk=iphoneos*], has no entitlements and no app extensions.
+      # Release config runs the "Bundle React Native code and images" phase,
+      # so the JS bundle + assets are embedded (no Metro needed at runtime).
+      - name: xcodebuild (Release, iphonesimulator, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/PopUp.xcworkspace \
+            -scheme PopUp \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package .app (EAS simulator artifact shape)
+        run: |
+          set -euo pipefail
+          APP_DIR="build/Build/Products/Release-iphonesimulator"
+          test -d "$APP_DIR/PopUp.app"
+          tar -czf "$RUNNER_TEMP/PopUp-sim-$BUILT_SHORT.tar.gz" -C "$APP_DIR" PopUp.app
+          ls -lh "$RUNNER_TEMP/PopUp-sim-$BUILT_SHORT.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: popup-sim-build
+          path: ${{ runner.temp }}/PopUp-sim-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Job summary
+        run: |
+          {
+            echo "## PopUp simulator build"
+            echo "- **Commit:** \`$BUILT_SHA\` (ref \`${{ github.event.inputs.ref }}\`)"
+            echo "- **Artifact:** \`popup-sim-build\` / \`PopUp-sim-$BUILT_SHORT.tar.gz\` (unsigned Release iphonesimulator .app)"
+            echo "- **Verify:** \`gh workflow run sim-verify.yml -R $GITHUB_REPOSITORY -f build_run_id=${{ github.run_id }} -f flow=all\`"
+            echo "- **Local fetch:** \`gh run download ${{ github.run_id }} -n popup-sim-build -R $GITHUB_REPOSITORY\`"
+          } >> "$GITHUB_STEP_SUMMARY"

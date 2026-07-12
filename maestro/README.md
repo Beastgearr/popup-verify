@@ -34,4 +34,13 @@ gh workflow run sim-verify.yml -f artifact_url=https://expo.dev/artifacts/eas/<h
 gh run list --workflow=sim-verify.yml   # then: gh run view <id> --log ; gh run download <id>
 ```
 
+**Free build lane (2026-07-12, EAS iOS quota exhausted):** the public mirror also carries `ios-build.yml` (canonical: `scripts/mirror/ios-build.yml`), which builds the unsigned Release simulator `.app` from the private source (read-only deploy key + Mapbox secrets on the mirror repo) and uploads it as the `popup-sim-build` artifact. Chain it into verification via the new `build_run_id` input (takes precedence over `artifact_url`):
+
+```
+gh workflow run ios-build.yml -R Beastgearr/popup-verify -f ref=main
+gh run list -R Beastgearr/popup-verify --workflow=ios-build.yml        # grab <build_run_id> when green
+gh workflow run sim-verify.yml -R Beastgearr/popup-verify -f build_run_id=<build_run_id> -f flow=all
+gh run download <build_run_id> -n popup-sim-build -R Beastgearr/popup-verify   # local fetch for the bsdtar -> Sauce lane
+```
+
 Artifacts land under the run's `sim-verify-<run_id>` bundle: `run.mp4` (screen recording), `final.png`, per-flow screenshots `01-*.png`…`20-*.png` (under `seeded/` and `no-location/` subdirs when `flow=all`), `maestro-debug*/` (per-step logs + on-failure screenshots), and `maestro-report*.xml` (JUnit — split into `-seeded`/`-noloc` variants when `flow=all`).
