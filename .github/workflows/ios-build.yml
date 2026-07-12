@@ -34,6 +34,10 @@ name: ios-build
 #   POPUP_DEPLOY_KEY        read-only deploy key for the private source
 #   MAPBOX_DOWNLOADS_TOKEN  sk.* downloads:read token for pod install
 #   MAPBOX_PUBLIC_TOKEN     pk.* runtime token baked into src/config/mapbox.ts
+#   SUPABASE_URL            demo-backend URL baked into src/config/supabase.ts
+#   SUPABASE_ANON_KEY       demo-backend anon key baked into src/config/supabase.ts
+#                           (RLS-protected, demo-only -- same exposure class as
+#                           the compiled artifact itself)
 
 on:
   workflow_dispatch:
@@ -89,6 +93,48 @@ jobs:
           MAPBOX_PUBLIC_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
           PRODUCTION: "1"
         run: node scripts/eas-build-pre-install.js
+
+      # The committed src/config/supabase.ts is a TRACKED placeholder
+      # (localhost URL + PLACEHOLDER_ANON_KEY); the real demo-backend values
+      # live only in the founder's local working tree behind git
+      # skip-worktree, so a fresh checkout bakes localhost into the JS
+      # bundle and every sim-verify login dies with ECONNREFUSED on
+      # auth-otp-send (build run 29207282150 -> sim-verify run 29207917445,
+      # 2026-07-12). EAS builds never hit this because EAS packs the working
+      # tree, not a git checkout. eas-build-pre-install.js cannot cover it
+      # either -- its never-clobber rule skips files that already exist, and
+      # this one exists with placeholder content. So: explicit overwrite
+      # from this repo's secrets, preserving the committed file's exact
+      # export surface, and a LOUD failure when either secret is missing --
+      # a silent fallback to localhost would recreate the incident
+      # invisibly. Written via quoted heredoc + in-place substitution so no
+      # value is echoed into the log.
+      - name: Inject Supabase demo config (overwrite tracked placeholder)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "SUPABASE_URL/ANON_KEY secrets missing -- refusing to bake the localhost placeholder"
+            exit 1
+          fi
+          cat > src/config/supabase.ts <<'TSEOF'
+          // Supabase client config -- GENERATED IN CI (ios-build.yml).
+          //
+          // The committed file is a localhost placeholder; this build lane
+          // overwrites it with the demo-backend values injected from the
+          // mirror repo's Actions secrets. See supabase.example.ts for context.
+
+          export const SUPABASE_URL = '__SUPABASE_URL__';
+          export const SUPABASE_ANON_KEY = '__SUPABASE_ANON_KEY__';
+          TSEOF
+          perl -pi -e 's/__SUPABASE_URL__/$ENV{SUPABASE_URL}/g; s/__SUPABASE_ANON_KEY__/$ENV{SUPABASE_ANON_KEY}/g' src/config/supabase.ts
+          if grep -q '__SUPABASE_' src/config/supabase.ts; then
+            echo "Supabase config substitution failed -- placeholder tokens still present"
+            exit 1
+          fi
+          echo "src/config/supabase.ts overwritten from repo secrets"
 
       - name: bundle install (pinned CocoaPods)
         run: bundle install
