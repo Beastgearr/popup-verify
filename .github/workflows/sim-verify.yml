@@ -305,6 +305,44 @@ jobs:
           echo "04-no-location exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
 
+      - name: "Run Maestro flow: 04-no-location (retry)"
+        id: flow_04_retry
+        # 2026-07-1x infra-retry hardening (run 29054312690): flow 04 is the
+        # LAST flow attempted per run, on an already-installed app + already-
+        # booted simulator that's been through 3 prior flows -- the diagnosed
+        # failure was the XCUITest driver never binding its port
+        # ("Failed to connect to /127.0.0.1:51373" for 2 min, zero commands
+        # executed, zero crash markers in syslog), i.e. runner-class flake,
+        # not an app bug. One retry, same command, same timeout budget --
+        # cheap because setup (install/boot/location seed) isn't repeated.
+        # Gated on `always()` because a failed flow_04 already flips
+        # success() to false for every later step in this job (matches the
+        # always()-wrapping pattern every other flow step here already uses)
+        # -- without it this condition would silently never evaluate true.
+        if: ${{ always() && steps.flow_04.outcome == 'failure' }}
+        timeout-minutes: 16
+        env:
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/no-location/04-no-location-retry
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
+          maestro test "$FLOWS_DIR/04-no-location.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-04-no-location-retry.xml \
+            --debug-output artifacts/maestro-debug-04-no-location-retry
+          MAESTRO_EXIT=$?
+          set -e
+          mv ./*.png artifacts/no-location/04-no-location-retry/ 2>/dev/null || true
+          echo "04-no-location (retry) exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
       - name: Stop screen recording + finalize artifacts
         if: always()
         run: |
@@ -375,10 +413,21 @@ jobs:
           O02="${{ steps.flow_02.outcome }}"
           O03="${{ steps.flow_03.outcome }}"
           O04="${{ steps.flow_04.outcome }}"
+          O04_RETRY="${{ steps.flow_04_retry.outcome }}"
+
+          # flow 04 gets one retry on infra-class failures (see the
+          # flow_04_retry step's comment, run 29054312690). Gate logic
+          # treats it as passed if EITHER attempt succeeded; the raw
+          # outcome of both attempts stays in the table below for
+          # attribution (which one actually passed).
+          O04_EFFECTIVE="$O04"
+          if [ "$O04" = "failure" ] && [ "$O04_RETRY" = "success" ]; then
+            O04_EFFECTIVE="success"
+          fi
 
           EXIT=0
           RAN_SOMETHING=0
-          for O in "$O01" "$O02" "$O03" "$O04"; do
+          for O in "$O01" "$O02" "$O03" "$O04_EFFECTIVE"; do
             if [ "$O" != "success" ] && [ "$O" != "skipped" ]; then
               EXIT=1
             fi
@@ -408,6 +457,7 @@ jobs:
             echo "| 02-map-and-tabs | ${O02:-n/a} |"
             echo "| 03-click-audit | ${O03:-n/a} |"
             echo "| 04-no-location | ${O04:-n/a} |"
+            echo "| 04-no-location (retry) | ${O04_RETRY:-n/a} |"
             echo ""
             if [ "$EXIT" = "0" ]; then
               echo "- **Maestro: PASS ✅**"
@@ -415,6 +465,6 @@ jobs:
               echo "- **Maestro: FAIL ❌ (one or more flow steps did not succeed — see table above)**"
             fi
             echo ""
-            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording spanning all flows), final.png, per-flow screenshots under seeded/01-boot-login/, seeded/02-map-and-tabs/, seeded/03-click-audit/, no-location/04-no-location/ (present only for flows actually run), maestro-debug-<flow>/ (per-flow debug logs + on-failure screenshots), maestro-report-<flow>.xml (per-flow JUnit)."
+            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording spanning all flows), final.png, per-flow screenshots under seeded/01-boot-login/, seeded/02-map-and-tabs/, seeded/03-click-audit/, no-location/04-no-location/ (present only for flows actually run), no-location/04-no-location-retry/ (present only if flow 04 failed and the retry ran), maestro-debug-<flow>/ (per-flow debug logs + on-failure screenshots; retry suffixed -retry), maestro-report-<flow>.xml (per-flow JUnit; retry suffixed -retry)."
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$EXIT"

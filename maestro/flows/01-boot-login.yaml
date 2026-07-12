@@ -33,10 +33,32 @@
 # plausibly worsened by the NeonBubblesBackground Reanimated organism running
 # behind all 4 auth screens contending for the JS thread mid-type. After
 # typing, the flow now asserts the phone field's rendered text actually holds
-# the full ${DEMO_PHONE} value and, if not, erases + retypes once via a
+# the full ${DEMO_PHONE} value and, if not, erases + retypes via a
 # conditional `runFlow: when: notVisible:` branch -- deterministic, no fixed
 # sleep. A healthy run (green 29039997885, 9m48s for this flow) never enters
 # that branch.
+#
+# 2026-07-1x hardening-gate flake fix (run 29054312690): all 4 flows failed
+# against build #16 on a very slow public runner. Flow 01's retype block
+# above worked correctly (the phone field held the exact, correct
+# ${DEMO_PHONE} value in the failure screenshot) -- but the hard
+# `assertVisible {id, text}` gate that used to sit right after it timed out
+# at Maestro's ~20s default poll window purely because text-matching was
+# slow, not because the value was wrong (same known Maestro text-assert
+# flow artifact already worked around below for main-tabs-button-map).
+# Separately, `waitForAnimationToEnd` calls on these auth screens raced
+# NeonBubblesBackground, which animates INFINITELY behind all 4 auth
+# screens -- one instance consumed 224s against its 5000ms budget waiting
+# for an animation that never ends. Both are fixed here: the
+# waitForAnimationToEnd calls on auth screens are removed (screen-readiness
+# is already gated by the extendedWaitUntil title/id checks before each),
+# and the phone-field gate below is now id-only, matching the file's own
+# main-tabs-button-map precedent. Correctness is still verified -- a
+# genuinely wrong/truncated number can't reach "Введи код" downstream, so
+# that gate catches a bad retype with a clearer failure signature than a
+# mid-flow text-assert timeout. A second retype round was added since the
+# first round is cheap and a slow runner could in principle drop chars on
+# the retype too.
 appId: com.popupgram.ios
 ---
 - launchApp:
@@ -61,16 +83,12 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible: "Введи номер"
     timeout: 30000
-- waitForAnimationToEnd:
-    timeout: 5000
 - inputText: ${DEMO_PHONE}
 # Char-drop retry (see header note): PhoneInputGroup's underlying TextInput
 # is `phone-input-group-field-input` (TextField atom appends `-input`; the
 # molecule's own testID is `phone-input-group-field`). If the rendered text
-# doesn't already match the full ${DEMO_PHONE}, erase and retype once, then
-# hard-assert the field is correct before continuing -- a still-wrong value
-# here should fail the flow loudly rather than silently submit a malformed
-# number.
+# doesn't already match the full ${DEMO_PHONE}, erase and retype -- up to
+# two rounds, in case a loaded runner drops chars on the retype too.
 - runFlow:
     when:
       notVisible:
@@ -79,38 +97,46 @@ appId: com.popupgram.ios
     commands:
       - eraseText
       - inputText: ${DEMO_PHONE}
+- runFlow:
+    when:
+      notVisible:
+        id: "phone-input-group-field-input"
+        text: "${DEMO_PHONE}"
+    commands:
+      - eraseText
+      - inputText: ${DEMO_PHONE}
+# id-only gate (see header note, run 29054312690): a text-equality assert
+# here is a known flow artifact under load. Correctness is verified
+# downstream instead -- a wrong/truncated number can't reach "Введи код".
 - assertVisible:
     id: "phone-input-group-field-input"
-    text: "${DEMO_PHONE}"
 # The "Получить код" button is bottom-pinned (ctaWrap marginTop:auto).
 # PhoneEntryScreen now wraps its content in a KeyboardAvoidingView (behavior
 # "padding" on iOS, commit 85931e9) so the CTA should already clear the
 # keyboard on its own; the hardware Return here is kept as belt-and-
 # suspenders in case KAV's animation races the keyboard's — it also blurs
 # the single-line TextInput (blurOnSubmit default), dismissing the keyboard;
-# the typed value persists in the form either way.
+# the typed value persists in the form either way. No waitForAnimationToEnd
+# here (see header note, run 29054312690) -- NeonBubblesBackground animates
+# infinitely on this screen, so that wait never actually resolves.
 - pressKey: Enter
-- waitForAnimationToEnd:
-    timeout: 5000
 - takeScreenshot: 02-phone
 - tapOn:
     id: "phone-submit"
 # OTP screen. auth-otp-send is a network round-trip (Test-OTP path, no real
 # SMS) so allow a generous wait for "Введи код". Fixed demo code injected
-# via ${DEMO_OTP} (see header note).
+# via ${DEMO_OTP} (see header note). No waitForAnimationToEnd here either --
+# same infinite-animation reasoning as above.
 - extendedWaitUntil:
     visible: "Введи код"
     timeout: 60000
-- waitForAnimationToEnd:
-    timeout: 5000
 - inputText: ${DEMO_OTP}
 # Same belt-and-suspenders keyboard-dismiss for the OTP screen's
 # bottom-pinned "Войти" button — VerifyOtpScreen also wraps its content in a
 # KeyboardAvoidingView now (commit 85931e9); Enter is kept in case KAV's
-# animation races the keyboard's.
+# animation races the keyboard's. No waitForAnimationToEnd here (see header
+# note, run 29054312690) -- same infinite-animation reasoning as above.
 - pressKey: Enter
-- waitForAnimationToEnd:
-    timeout: 5000
 - takeScreenshot: 03-otp
 - tapOn:
     id: "otp-submit"
