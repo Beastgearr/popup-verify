@@ -59,6 +59,22 @@
 # mid-flow text-assert timeout. A second retype round was added since the
 # first round is cheap and a slow runner could in principle drop chars on
 # the retype too.
+#
+# 2026-07-1x re-diagnosis after re-verify (run 29192686342): the id-only
+# `assertVisible` above STILL failed -- all 4 flows, same error, same
+# on-failure screenshot again showing the field correctly holding the full,
+# correct ${DEMO_PHONE} value. maestro.log timestamps showed why: the two
+# `when: notVisible` retype-check evaluations immediately above took ~63s and
+# ~50s respectively to resolve (RUNNING -> COMPLETED), and the follow-on
+# `assertVisible` failed after ~20s -- i.e. a SINGLE accessibility-tree
+# round trip on this runner class can cost 50-90s, and plain
+# `assertVisible` (even id-only, no text) uses Maestro's short default
+# poll window regardless of the text argument, so it doesn't survive that.
+# The runner is measurably even slower than in 29054312690, not better.
+# Fix: the gate is now `extendedWaitUntil` (id-only) with an explicit
+# 120000ms timeout -- enough headroom for at least one full worst-case
+# round trip as observed above. Correctness is still ultimately verified
+# by "Введи код" downstream regardless of how this gate resolves.
 appId: com.popupgram.ios
 ---
 - launchApp:
@@ -105,11 +121,16 @@ appId: com.popupgram.ios
     commands:
       - eraseText
       - inputText: ${DEMO_PHONE}
-# id-only gate (see header note, run 29054312690): a text-equality assert
-# here is a known flow artifact under load. Correctness is verified
-# downstream instead -- a wrong/truncated number can't reach "Введи код".
-- assertVisible:
-    id: "phone-input-group-field-input"
+# id-only gate, extendedWaitUntil not assertVisible (see header note, runs
+# 29054312690 + 29192686342): a bare assertVisible -- even id-only, with no
+# text match -- uses Maestro's short default poll window, which this
+# runner class's ~50-90s single accessibility-tree round trip doesn't
+# survive. Correctness is still verified downstream regardless -- a
+# wrong/truncated number can't reach "Введи код".
+- extendedWaitUntil:
+    visible:
+      id: "phone-input-group-field-input"
+    timeout: 120000
 # The "Получить код" button is bottom-pinned (ctaWrap marginTop:auto).
 # PhoneEntryScreen now wraps its content in a KeyboardAvoidingView (behavior
 # "padding" on iOS, commit 85931e9) so the CTA should already clear the
@@ -150,10 +171,22 @@ appId: com.popupgram.ios
 # though the label visibly rendered (known Maestro text-assert flow
 # artifact) — main-tabs-button-map (tabBarButtonTestID, MainTabs.tsx)
 # covers the same tab-bar entry via a stable selector instead.
+#
+# 2026-07-1x (run 29192686342 finding): the follow-up check below used to
+# be a bare `assertVisible` -- this file's own former reference precedent
+# for "the id-only pattern that survives Maestro's text-assert flake." That
+# same run proved bare assertVisible (even id-only, right after a sibling
+# element already confirmed the screen ready) is not actually safe on this
+# runner class -- see the phone-field gate's header note above for the
+# maestro.log evidence (50-90s single accessibility round trips). Upgraded
+# to extendedWaitUntil here too, pre-emptively, rather than waiting for a
+# separate CI cycle to rediscover the same failure mode on this line.
 - extendedWaitUntil:
     visible:
       id: "main-tabs-button-map-icon"
     timeout: 90000
-- assertVisible:
-    id: "main-tabs-button-map"
+- extendedWaitUntil:
+    visible:
+      id: "main-tabs-button-map"
+    timeout: 60000
 - takeScreenshot: 04-map
