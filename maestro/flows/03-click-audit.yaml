@@ -118,7 +118,12 @@ appId: com.popupgram.ios
 - assertNotVisible:
     id: "create-header"
 
-# --- Friends tab: friend row -> UserProfileScreen ---
+# --- Friends tab: friend row -> UserProfileSheet -> «Открыть профиль» -> UserProfileScreen ---
+# Tapping a FriendRow does NOT navigate directly: FriendsScreen's onPressRow
+# presents the UserProfileSheet bottom sheet (behavior since ecd81ee); only the
+# sheet's «Открыть профиль» row (`sheet-open-profile`) navigates to the
+# UserProfile screen, self-dismissing the sheet on tap (handleOpenProfile calls
+# onClose()), so the back-out below still lands on `friends-header`.
 - tapOn:
     id: "main-tabs-button-friends"
 - extendedWaitUntil:
@@ -128,6 +133,12 @@ appId: com.popupgram.ios
 - tapOn:
     id: "friend-row-[0-9a-fA-F]{8}-.*"
     index: 0
+- extendedWaitUntil:
+    visible:
+      id: "profile-sheet-header"
+    timeout: 15000
+- tapOn:
+    id: "sheet-open-profile"
 - extendedWaitUntil:
     visible:
       id: "user-profile-screen"
