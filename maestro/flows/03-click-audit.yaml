@@ -39,6 +39,16 @@
 # bottom-sheet-dismiss checks below) are left as-is -- confirming an
 # element's ABSENCE doesn't carry the same "wait for a slow scan to find
 # a match" risk profile as confirming presence.
+#
+# Timeout standard (run 29213327096): 45000ms is the MINIMUM timeout for
+# every presence gate (`extendedWaitUntil` visible) in this flow -- the
+# slow-runner floor implied by the note above (single commands observed
+# at 45-120s on this shared free-tier runner class). The 24f6bd0-era gates
+# landed at 15000/30000, below that floor, and passed earlier runs only by
+# runner luck; run 29213327096 proved it when the profile sheet rendered
+# ~16s after its tap and the 15000ms `profile-sheet-header` gate missed
+# it. Every sub-45000 presence gate was widened to 45000 accordingly --
+# do not add new gates below 45000.
 appId: com.popupgram.ios
 ---
 - runFlow: 01-boot-login.yaml
@@ -75,7 +85,7 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible:
       id: "venue-detail-sheet"
-    timeout: 15000
+    timeout: 45000
 - extendedWaitUntil:
     visible:
       id: "venue-detail-name"
@@ -91,7 +101,7 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible:
       id: "create-header"
-    timeout: 15000
+    timeout: 45000
 - takeScreenshot: 11-click-audit-venue-create-sheet
 # Dismiss WITHOUT submitting -- pan-down-to-close swipe, never `sheet-submit`.
 - swipe:
@@ -108,7 +118,7 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible:
       id: "create-header"
-    timeout: 15000
+    timeout: 45000
 - takeScreenshot: 12-click-audit-fab-create-sheet
 - swipe:
     start: 50%, 55%
@@ -124,32 +134,49 @@ appId: com.popupgram.ios
 # sheet's «Открыть профиль» row (`sheet-open-profile`) navigates to the
 # UserProfile screen, self-dismissing the sheet on tap (handleOpenProfile calls
 # onClose()), so the back-out below still lands on `friends-header`.
+#
+# Carousel layout-shift tap race (run 29213327096): FriendsScreen mounts the
+# async «Может, ты их знаешь» SuggestionsCarousel ABOVE the friend list.
+# Maestro resolved the first friend-row's bounds pre-carousel at [0,167], the
+# carousel then finished loading and pushed the list down to [0,333], and the
+# tap at (187,201) landed on suggestion-card-a6666666 instead of the friend
+# row. The `suggestion-card-.*` settle gate below (cards render as
+# `suggestion-card-{id}` in SuggestionsCarousel.tsx; the 3 cards are
+# deterministically seeded on popup-demo) forces the carousel to finish
+# loading -- i.e. the list to reach its final layout -- BEFORE the
+# friend-row bounds are resolved for the tap.
 - tapOn:
     id: "main-tabs-button-friends"
 - extendedWaitUntil:
     visible:
       id: "friends-header"
-    timeout: 30000
+    timeout: 45000
+- extendedWaitUntil:
+    visible:
+      id: "suggestion-card-.*"
+    timeout: 45000
+- waitForAnimationToEnd:
+    timeout: 5000
 - tapOn:
     id: "friend-row-[0-9a-fA-F]{8}-.*"
     index: 0
 - extendedWaitUntil:
     visible:
       id: "profile-sheet-header"
-    timeout: 15000
+    timeout: 45000
 - tapOn:
     id: "sheet-open-profile"
 - extendedWaitUntil:
     visible:
       id: "user-profile-screen"
-    timeout: 15000
+    timeout: 45000
 - takeScreenshot: 13-click-audit-user-profile
 - tapOn:
     id: "user-profile-back-button"
 - extendedWaitUntil:
     visible:
       id: "friends-header"
-    timeout: 15000
+    timeout: 45000
 
 # --- Settings tab: Help row -> FaqScreen (+ back-out); a Legal row -> LegalDocumentScreen ---
 - tapOn:
@@ -157,13 +184,13 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible:
       id: "settings-profile-name-row"
-    timeout: 30000
+    timeout: 45000
 - tapOn:
     id: "settings-help-row"
 - extendedWaitUntil:
     visible:
       id: "faq-screen"
-    timeout: 15000
+    timeout: 45000
 - extendedWaitUntil:
     visible:
       id: "faq-item-0"
@@ -174,17 +201,17 @@ appId: com.popupgram.ios
 - extendedWaitUntil:
     visible:
       id: "settings-profile-name-row"
-    timeout: 15000
+    timeout: 45000
 - tapOn:
     id: "settings-legal-terms-row"
 - extendedWaitUntil:
     visible:
       id: "legal-document-screen"
-    timeout: 15000
+    timeout: 45000
 - takeScreenshot: 15-click-audit-legal
 - tapOn:
     id: "legal-document-back-button"
 - extendedWaitUntil:
     visible:
       id: "settings-profile-name-row"
-    timeout: 15000
+    timeout: 45000
