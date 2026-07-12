@@ -25,6 +25,15 @@
 # whether or not a location is seeded -- GoTrue/Test-OTP auth doesn't touch
 # CoreLocation) so this flow can run standalone
 # (`-f flow=04-no-location.yaml`) or as the tail of `flow=all`.
+#
+# 2026-07-1x (see 01-boot-login.yaml's header note, runs 29054312690 /
+# 29192686342 / 29194338065): bare `assertVisible` (no explicit timeout)
+# uses Maestro's short default poll window, which repeatedly proved unsafe
+# against a severely overloaded, erratically-slow shared free-tier runner
+# -- single commands ranged from <1s to 120s+ within the SAME flow run.
+# The three checks below were converted to `extendedWaitUntil` for the
+# same reason, pre-emptively, rather than waiting for a CI cycle to
+# rediscover the identical failure here.
 appId: com.popupgram.ios
 ---
 - runFlow: 01-boot-login.yaml
@@ -35,10 +44,16 @@ appId: com.popupgram.ios
 # filter-chip row and the venue band -- are visible, meaning the screen isn't
 # a blank void and didn't crash trying to center a camera on a location that
 # never arrived.
-- assertVisible:
-    id: "map-view"
-- assertVisible:
-    id: "map-filter-chips"
-- assertVisible:
-    id: "venue-carousel-band"
+- extendedWaitUntil:
+    visible:
+      id: "map-view"
+    timeout: 45000
+- extendedWaitUntil:
+    visible:
+      id: "map-filter-chips"
+    timeout: 45000
+- extendedWaitUntil:
+    visible:
+      id: "venue-carousel-band"
+    timeout: 45000
 - takeScreenshot: 20-no-location-map

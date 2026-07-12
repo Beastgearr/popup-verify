@@ -11,6 +11,15 @@
 # Tab *labels* ("Карта"/"Друзья"/"Настройки") are always present in the tab
 # bar, so they can't confirm navigation — we assert per-screen testIDs
 # instead (friends-header, settings-profile-name-row).
+#
+# 2026-07-1x (see 01-boot-login.yaml's header note, runs 29054312690 /
+# 29192686342 / 29194338065): bare `assertVisible` (no explicit timeout)
+# uses Maestro's short default poll window, which repeatedly proved unsafe
+# against a severely overloaded, erratically-slow shared free-tier runner
+# -- single commands ranged from <1s to 120s+ within the SAME flow run.
+# The trailing check below was converted to `extendedWaitUntil` for the
+# same reason, pre-emptively, rather than waiting for a CI cycle to
+# rediscover the identical failure here.
 appId: com.popupgram.ios
 ---
 - launchApp
@@ -39,6 +48,8 @@ appId: com.popupgram.ios
 # Back to Map.
 - tapOn:
     id: "main-tabs-button-map"
-- assertVisible:
-    id: "main-tabs-button-map"
+- extendedWaitUntil:
+    visible:
+      id: "main-tabs-button-map"
+    timeout: 60000
 - takeScreenshot: 08-map-again

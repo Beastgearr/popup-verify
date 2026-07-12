@@ -27,6 +27,18 @@
 # `friend-row-*`-prefixed testIDs in the codebase) don't start with 8 hex
 # digits, so the regex stays unambiguous; `index: 0` picks the first (topmost)
 # match.
+#
+# 2026-07-1x (see 01-boot-login.yaml's header note, runs 29054312690 /
+# 29192686342 / 29194338065): bare `assertVisible` (no explicit timeout)
+# uses Maestro's short default poll window, which repeatedly proved unsafe
+# against a severely overloaded, erratically-slow shared free-tier runner
+# -- single commands ranged from <1s to 120s+ within the SAME flow run.
+# Every bare `assertVisible` below was converted to `extendedWaitUntil`
+# for the same reason, pre-emptively, rather than waiting for a CI cycle
+# to rediscover the identical failure here. `assertNotVisible` calls (the
+# bottom-sheet-dismiss checks below) are left as-is -- confirming an
+# element's ABSENCE doesn't carry the same "wait for a slow scan to find
+# a match" risk profile as confirming presence.
 appId: com.popupgram.ios
 ---
 - runFlow: 01-boot-login.yaml
@@ -37,16 +49,22 @@ appId: com.popupgram.ios
 # reset back to "all" at the end so later steps see the unfiltered dot set. ---
 - tapOn:
     id: "map-filter-friends"
-- assertVisible:
-    id: "map-filter-friends"
+- extendedWaitUntil:
+    visible:
+      id: "map-filter-friends"
+    timeout: 45000
 - tapOn:
     id: "map-filter-close_friends"
-- assertVisible:
-    id: "map-filter-close_friends"
+- extendedWaitUntil:
+    visible:
+      id: "map-filter-close_friends"
+    timeout: 45000
 - tapOn:
     id: "map-filter-all"
-- assertVisible:
-    id: "map-filter-all"
+- extendedWaitUntil:
+    visible:
+      id: "map-filter-all"
+    timeout: 45000
 - takeScreenshot: 09-click-audit-filters
 
 # --- Venue chip -> VenueDetailSheet -> create CTA -> create sheet ---
@@ -58,8 +76,10 @@ appId: com.popupgram.ios
     visible:
       id: "venue-detail-sheet"
     timeout: 15000
-- assertVisible:
-    id: "venue-detail-name"
+- extendedWaitUntil:
+    visible:
+      id: "venue-detail-name"
+    timeout: 45000
 - takeScreenshot: 10-click-audit-venue-sheet
 - tapOn:
     id: "venue-detail-create-cta"
@@ -133,8 +153,10 @@ appId: com.popupgram.ios
     visible:
       id: "faq-screen"
     timeout: 15000
-- assertVisible:
-    id: "faq-item-0"
+- extendedWaitUntil:
+    visible:
+      id: "faq-item-0"
+    timeout: 45000
 - takeScreenshot: 14-click-audit-faq
 - tapOn:
     id: "faq-back-button"

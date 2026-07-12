@@ -44,13 +44,28 @@ name: sim-verify
 # Per-flow step budgets (flow=all runs login three times -- flows 01, 03,
 # 04, the latter two via `runFlow: 01-boot-login.yaml` -- flow 01 alone
 # took 9m48s while GREEN on run 29039997885):
-#   01-boot-login:    16 min
-#   02-map-and-tabs:   8 min
-#   03-click-audit:   20 min
-#   04-no-location:   16 min
-#   job (backstop):   80 min -- loose ceiling only (sum of the above plus
+#   01-boot-login:    22 min
+#   02-map-and-tabs:  12 min
+#   03-click-audit:   40 min
+#   04-no-location:   25 min
+#   04-no-location
+#     (retry):        25 min -- matches flow_04's budget (same command)
+#   job (backstop):  150 min -- loose ceiling only (sum of the above plus
 #                     setup/finalize overhead); not meant to bind in normal
 #                     operation now that each flow is independently bounded.
+#
+# 2026-07-1x budget revision (runs 29192686342 / 29194338065): a severely
+# overloaded, erratically-slow shared free-tier runner produced per-command
+# Maestro/XCUITest latencies ranging from <1s to 120s+ WITHIN THE SAME flow
+# run (see maestro/flows/01-boot-login.yaml's header for the maestro.log
+# evidence). The maestro-flow-level fix widened several extendedWaitUntil
+# gates and removed one bare `assertVisible` gate entirely; these step
+# budgets were widened in step so a slow-but-progressing run gets to finish
+# (and upload full diagnostics) instead of being killed by an
+# under-provisioned step timeout -- which would silently regress the whole
+# point of the 2026-07-10 per-flow split (see above): a step-timeout kill
+# still runs the if: always()-gated finalize/upload steps, but a run that's
+# genuinely still making progress deserves the chance to finish first.
 
 on:
   workflow_dispatch:
@@ -66,7 +81,7 @@ on:
 jobs:
   sim-verify:
     runs-on: macos-15
-    timeout-minutes: 80
+    timeout-minutes: 150
     env:
       APP_ID: com.popupgram.ios
       FLOWS_DIR: maestro/flows
@@ -184,7 +199,7 @@ jobs:
       - name: "Run Maestro flow: 01-boot-login"
         id: flow_01
         if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '01-boot-login.yaml') }}
-        timeout-minutes: 16
+        timeout-minutes: 22
         env:
           # Public repo — no plaintext credentials in the workflow. Set via:
           #   gh secret set DEMO_PHONE -R Beastgearr/popup-verify
@@ -224,7 +239,7 @@ jobs:
         # its own terms (bounded by its own timeout) so the per-flow outcome
         # table stays honest about what actually happened.
         if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '02-map-and-tabs.yaml') }}
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           set -uo pipefail
           export PATH="$HOME/.maestro/bin:$PATH"
@@ -245,7 +260,7 @@ jobs:
       - name: "Run Maestro flow: 03-click-audit"
         id: flow_03
         if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '03-click-audit.yaml') }}
-        timeout-minutes: 20
+        timeout-minutes: 40
         env:
           DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
           DEMO_OTP: ${{ secrets.DEMO_OTP }}
@@ -282,7 +297,7 @@ jobs:
       - name: "Run Maestro flow: 04-no-location"
         id: flow_04
         if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '04-no-location.yaml') }}
-        timeout-minutes: 16
+        timeout-minutes: 25
         env:
           DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
           DEMO_OTP: ${{ secrets.DEMO_OTP }}
@@ -320,7 +335,7 @@ jobs:
         # always()-wrapping pattern every other flow step here already uses)
         # -- without it this condition would silently never evaluate true.
         if: ${{ always() && steps.flow_04.outcome == 'failure' }}
-        timeout-minutes: 16
+        timeout-minutes: 25
         env:
           DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
           DEMO_OTP: ${{ secrets.DEMO_OTP }}
