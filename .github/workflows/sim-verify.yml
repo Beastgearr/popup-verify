@@ -48,11 +48,14 @@ name: sim-verify
 #   02-map-and-tabs:  12 min
 #   03-click-audit:   40 min
 #   04-no-location:   25 min
-#   04-no-location
-#     (retry):        25 min -- matches flow_04's budget (same command)
-#   job (backstop):  150 min -- loose ceiling only (sum of the above plus
-#                     setup/finalize overhead); not meant to bind in normal
-#                     operation now that each flow is independently bounded.
+#   <flow> (retry):   same budget as that flow's first attempt (same
+#                     command). Retry-once was extended from flow 04 to all
+#                     four flows on 2026-07-13 (run 29215135760) -- see the
+#                     (retry) steps' comments.
+#   job (backstop):  230 min -- loose ceiling only (sum of the above incl.
+#                     worst-case retries, plus setup/finalize overhead); not
+#                     meant to bind in normal operation now that each flow
+#                     is independently bounded.
 #
 # 2026-07-1x budget revision (runs 29192686342 / 29194338065): a severely
 # overloaded, erratically-slow shared free-tier runner produced per-command
@@ -84,7 +87,7 @@ on:
 jobs:
   sim-verify:
     runs-on: macos-15
-    timeout-minutes: 150
+    timeout-minutes: 230
     env:
       APP_ID: com.popupgram.ios
       FLOWS_DIR: maestro/flows
@@ -166,6 +169,29 @@ jobs:
           defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool true || true
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID"
+          # Reduce Motion (2026-07-13, run 29215135760): NeonBubblesBackground
+          # animates infinitely behind all four auth screens, so Maestro's
+          # isScreenStatic never converges there and a viewHierarchy snapshot
+          # can race live CoreAnimation -- XCUITest hit
+          # kAXErrorInvalidUIElement "getting snapshot" mid-animation
+          # (keyboard dismiss + bubbles), XCTest recorded it as a test
+          # failure, and that tore down Maestro's in-test driver HTTP server
+          # (every later CLI call: "Failed to connect to /127.0.0.1:<port>").
+          # The app freezes NeonBubbles under Reduce Motion by design, so the
+          # auth screens go static and that AX-snapshot race window
+          # collapses. Set once here: the simulator is never rebooted below,
+          # so this covers BOTH Maestro invocations (the Moscow-seeded 01-03
+          # pass and the location-cleared 04 pass).
+          # `simctl ui <udid> reduce-motion` is the clean form but only
+          # exists in the Xcode 26-era simctl (it ships alongside the
+          # liquid-glass toggle); this runner is macos-15 / default Xcode
+          # 16.4, whose `simctl ui` only knows
+          # appearance/increase_contrast/content_size -- so fall back to
+          # writing the accessibility default directly (the long-standing
+          # CI-stable equivalent; the app reads it at launch, which happens
+          # after this step).
+          xcrun simctl ui "$UDID" reduce-motion enabled \
+            || xcrun simctl spawn "$UDID" defaults write com.apple.Accessibility ReduceMotionEnabled -bool true
           open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
           echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
 
@@ -256,6 +282,47 @@ jobs:
           echo "01-boot-login exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
 
+      - name: "Run Maestro flow: 01-boot-login (retry)"
+        id: flow_01_retry
+        # 2026-07-13 infra-retry hardening (run 29215135760): flows 01-03 get
+        # the same retry-once-on-failure treatment flow 04 already had (see
+        # flow_04_retry below, run 29054312690). Diagnosed failure class:
+        # Maestro's iOS driver runs its HTTP server inside a single XCTest
+        # case (testHttpServer); one kAXErrorInvalidUIElement AX-snapshot
+        # race (a viewHierarchy taken mid-animation) is recorded as a test
+        # FAILURE, which kills the driver's HTTP server, and every later CLI
+        # call dies with "Failed to connect to /127.0.0.1:<port>" --
+        # runner-class flake, not an app or flow bug (the same login passed
+        # twice elsewhere in the same run). One retry, same command, same
+        # timeout budget -- cheap because the app is already installed and
+        # the flow is self-contained (clearState + fresh login). Gated on
+        # always() for the same reason as flow_04_retry: an earlier failure
+        # already flips success() to false, so without it this condition
+        # would silently never evaluate true.
+        if: ${{ always() && steps.flow_01.outcome == 'failure' }}
+        timeout-minutes: 22
+        env:
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/01-boot-login-retry
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
+          maestro test "$FLOWS_DIR/01-boot-login.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-01-boot-login-retry.xml \
+            --debug-output artifacts/maestro-debug-01-boot-login-retry
+          MAESTRO_EXIT=$?
+          set -e
+          mv ./*.png artifacts/seeded/01-boot-login-retry/ 2>/dev/null || true
+          echo "01-boot-login (retry) exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
       - name: "Run Maestro flow: 02-map-and-tabs"
         id: flow_02
         # No login of its own -- depends on 01-boot-login's persisted GoTrue
@@ -283,6 +350,33 @@ jobs:
           echo "02-map-and-tabs exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
 
+      - name: "Run Maestro flow: 02-map-and-tabs (retry)"
+        id: flow_02_retry
+        # Same retry-once idiom as flow_01_retry above (2026-07-13, run
+        # 29215135760) -- see its comment for the diagnosed driver-death
+        # failure class. Like the first attempt, this relies on
+        # 01-boot-login's persisted GoTrue session (no login of its own);
+        # the session survives a failed attempt, so a plain re-invocation
+        # is enough.
+        if: ${{ always() && steps.flow_02.outcome == 'failure' }}
+        timeout-minutes: 12
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/02-map-and-tabs-retry
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
+          maestro test "$FLOWS_DIR/02-map-and-tabs.yaml" \
+            --format junit \
+            --output artifacts/maestro-report-02-map-and-tabs-retry.xml \
+            --debug-output artifacts/maestro-debug-02-map-and-tabs-retry
+          MAESTRO_EXIT=$?
+          set -e
+          mv ./*.png artifacts/seeded/02-map-and-tabs-retry/ 2>/dev/null || true
+          echo "02-map-and-tabs (retry) exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
       - name: "Run Maestro flow: 03-click-audit"
         id: flow_03
         if: ${{ always() && (github.event.inputs.flow == 'all' || github.event.inputs.flow == '' || github.event.inputs.flow == '03-click-audit.yaml') }}
@@ -307,6 +401,40 @@ jobs:
           set -e
           mv ./*.png artifacts/seeded/03-click-audit/ 2>/dev/null || true
           echo "03-click-audit exit: $MAESTRO_EXIT"
+          exit "$MAESTRO_EXIT"
+
+      - name: "Run Maestro flow: 03-click-audit (retry)"
+        id: flow_03_retry
+        # Same retry-once idiom as flow_01_retry above (2026-07-13, run
+        # 29215135760 -- flow 03 is where that run's driver death actually
+        # landed: kAXErrorInvalidUIElement during a viewHierarchy snapshot
+        # on the animating OTP screen, then "Failed to connect to
+        # /127.0.0.1:54026" for the rest of the flow, erroring at a trivial
+        # pressKey while flows 01 and 04 passed the same login in the same
+        # run). Placed BEFORE the "Clear simulated location" step below so
+        # the retry still runs Moscow-seeded like the first attempt.
+        if: ${{ always() && steps.flow_03.outcome == 'failure' }}
+        timeout-minutes: 40
+        env:
+          DEMO_PHONE: ${{ secrets.DEMO_PHONE }}
+          DEMO_OTP: ${{ secrets.DEMO_OTP }}
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.maestro/bin:$PATH"
+          mkdir -p artifacts/seeded/03-click-audit-retry
+          # See the set +e/set -e note in the 01-boot-login step above --
+          # same errexit-survival bracket, required here too.
+          set +e
+          maestro test "$FLOWS_DIR/03-click-audit.yaml" \
+            -e DEMO_PHONE="$DEMO_PHONE" \
+            -e DEMO_OTP="$DEMO_OTP" \
+            --format junit \
+            --output artifacts/maestro-report-03-click-audit-retry.xml \
+            --debug-output artifacts/maestro-debug-03-click-audit-retry
+          MAESTRO_EXIT=$?
+          set -e
+          mv ./*.png artifacts/seeded/03-click-audit-retry/ 2>/dev/null || true
+          echo "03-click-audit (retry) exit: $MAESTRO_EXIT"
           exit "$MAESTRO_EXIT"
 
       - name: Clear simulated location (seeded -> no-location transition)
@@ -451,16 +579,31 @@ jobs:
         run: |
           set -uo pipefail
           O01="${{ steps.flow_01.outcome }}"
+          O01_RETRY="${{ steps.flow_01_retry.outcome }}"
           O02="${{ steps.flow_02.outcome }}"
+          O02_RETRY="${{ steps.flow_02_retry.outcome }}"
           O03="${{ steps.flow_03.outcome }}"
+          O03_RETRY="${{ steps.flow_03_retry.outcome }}"
           O04="${{ steps.flow_04.outcome }}"
           O04_RETRY="${{ steps.flow_04_retry.outcome }}"
 
-          # flow 04 gets one retry on infra-class failures (see the
-          # flow_04_retry step's comment, run 29054312690). Gate logic
-          # treats it as passed if EITHER attempt succeeded; the raw
-          # outcome of both attempts stays in the table below for
-          # attribution (which one actually passed).
+          # Every flow gets one retry on infra-class failures (flow 04 since
+          # run 29054312690; flows 01-03 since run 29215135760 -- see the
+          # (retry) steps' comments). Gate logic treats a flow as passed if
+          # EITHER attempt succeeded; the raw outcome of both attempts stays
+          # in the table below for attribution (which one actually passed).
+          O01_EFFECTIVE="$O01"
+          if [ "$O01" = "failure" ] && [ "$O01_RETRY" = "success" ]; then
+            O01_EFFECTIVE="success"
+          fi
+          O02_EFFECTIVE="$O02"
+          if [ "$O02" = "failure" ] && [ "$O02_RETRY" = "success" ]; then
+            O02_EFFECTIVE="success"
+          fi
+          O03_EFFECTIVE="$O03"
+          if [ "$O03" = "failure" ] && [ "$O03_RETRY" = "success" ]; then
+            O03_EFFECTIVE="success"
+          fi
           O04_EFFECTIVE="$O04"
           if [ "$O04" = "failure" ] && [ "$O04_RETRY" = "success" ]; then
             O04_EFFECTIVE="success"
@@ -468,7 +611,7 @@ jobs:
 
           EXIT=0
           RAN_SOMETHING=0
-          for O in "$O01" "$O02" "$O03" "$O04_EFFECTIVE"; do
+          for O in "$O01_EFFECTIVE" "$O02_EFFECTIVE" "$O03_EFFECTIVE" "$O04_EFFECTIVE"; do
             if [ "$O" != "success" ] && [ "$O" != "skipped" ]; then
               EXIT=1
             fi
@@ -495,8 +638,11 @@ jobs:
             echo "| Flow | Step outcome |"
             echo "|------|--------------|"
             echo "| 01-boot-login | ${O01:-n/a} |"
+            echo "| 01-boot-login (retry) | ${O01_RETRY:-n/a} |"
             echo "| 02-map-and-tabs | ${O02:-n/a} |"
+            echo "| 02-map-and-tabs (retry) | ${O02_RETRY:-n/a} |"
             echo "| 03-click-audit | ${O03:-n/a} |"
+            echo "| 03-click-audit (retry) | ${O03_RETRY:-n/a} |"
             echo "| 04-no-location | ${O04:-n/a} |"
             echo "| 04-no-location (retry) | ${O04_RETRY:-n/a} |"
             echo ""
@@ -506,6 +652,6 @@ jobs:
               echo "- **Maestro: FAIL ❌ (one or more flow steps did not succeed — see table above)**"
             fi
             echo ""
-            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording spanning all flows), final.png, per-flow screenshots under seeded/01-boot-login/, seeded/02-map-and-tabs/, seeded/03-click-audit/, no-location/04-no-location/ (present only for flows actually run), no-location/04-no-location-retry/ (present only if flow 04 failed and the retry ran), maestro-debug-<flow>/ (per-flow debug logs + on-failure screenshots; retry suffixed -retry), maestro-report-<flow>.xml (per-flow JUnit; retry suffixed -retry)."
+            echo "Artifacts (\`sim-verify-${{ github.run_id }}\`): run.mp4 (screen recording spanning all flows), final.png, per-flow screenshots under seeded/01-boot-login/, seeded/02-map-and-tabs/, seeded/03-click-audit/, no-location/04-no-location/ (present only for flows actually run; a sibling <flow>-retry/ dir appears only if that flow failed and its retry ran), maestro-debug-<flow>/ (per-flow debug logs + on-failure screenshots; retry suffixed -retry), maestro-report-<flow>.xml (per-flow JUnit; retry suffixed -retry)."
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$EXIT"
